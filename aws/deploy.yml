@@ -1,0 +1,125 @@
+Description: CloudFormation template for Deploy stage of Influx Relay component
+
+Parameters:
+  CommitHash:
+    Type: String
+  DeployEnvironment:
+    Type: String
+  Name:
+    Type: String
+  RepositoryURL:
+    Type: String
+
+Mappings:
+  EnvMap:
+    stage:
+      ClusterName: '{{resolve:ssm:stage-cluster-name:1}}'
+      Subnets: 'subnet-097a17ec914f9e89d,subnet-097a17ec914f9e89d'
+      LogLevel: 'DEBUG'
+      CPUValue: '256'
+      MemoryValue: '512'
+      LogRetentionDays: 14
+    prod:
+      ClusterName: '{{resolve:ssm:prod-cluster-name:1}}'
+      Subnets: 'subnet-856003ee,subnet-6b30eb16'
+      LogLevel: 'INFO'
+      CPUValue: '512'
+      MemoryValue: '1024'
+      LogRetentionDays: 365
+
+Resources:
+  # TODO: figure out how logging for this works (specifically for Firehose/OpenSearch)
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: !FindInMap [EnvMap, !Ref DeployEnvironment, LogRetentionDays]
+    UpdateReplacePolicy: Retain
+    DeletionPolicy: Retain
+
+  InfluxRelaySecurityGroup:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      GroupDescription: Influx Relay SG
+      VpcId: !ImportValue VpcId
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          FromPort: -1
+          ToPort: -1
+          CidrIp: 0.0.0.0/0
+      # TODO: Add rule to allow inbound traffic on TCP 8086
+      # TODO: Maybe add rule to restrict outbound traffic to Influx cluster
+
+  Service:
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: !Join [ '-', [ !Ref Name, !Ref DeployEnvironment, 'Service' ] ]
+      Cluster: !FindInMap [EnvMap, !Ref DeployEnvironment, ClusterName]
+      LaunchType: FARGATE
+      DesiredCount: 1
+      TaskDefinition: !Ref ServiceTaskDefinition
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          SecurityGroups: [!Ref InfluxRelaySecurityGroup]
+          Subnets: !Split [ ',' , !FindInMap [ EnvMap, !Ref DeployEnvironment, Subnets ] ]
+
+  TaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          Effect: Allow
+          Principal:
+            Service: ecs-tasks.amazonaws.com
+          Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: InfluxRelayPermissions
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - firehose:PutRecord
+                  - firehose:PutRecordBatch
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - logs:*
+                Resource: '*'
+
+  ServiceTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      ContainerDefinitions:
+        - Environment:
+            - Name: LOG_LEVEL
+              Value: !FindInMap [EnvMap, !Ref DeployEnvironment, LogLevel]
+            - Name: COMPONENT
+              Value: !Ref Name
+            - Name: ENVIRONMENT
+              Value: !Ref DeployEnvironment
+            - Name: KINESIS_DELIVERY_STREAM
+              Value: "{{resolve:ssm:kinesis-data-firehose-delivery-log-stream-ref:1}}"
+
+          Essential: true
+          Image: !Sub "${RepositoryURL}:${CommitHash}"
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref 'AWS::Region'
+              awslogs-stream-prefix: task
+          Name: !Join [ '-', [ !Ref Name, !Ref DeployEnvironment] ]
+          Privileged: false
+
+      Cpu: !FindInMap [EnvMap, !Ref DeployEnvironment, CPUValue]
+      Memory: !FindInMap [EnvMap, !Ref DeployEnvironment, MemoryValue]
+      Family: influx-relay
+      NetworkMode: awsvpc
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskExecutionRole.Arn
+      RequiresCompatibilities: [FARGATE]
+      RuntimePlatform:
+        OperatingSystemFamily: 'LINUX'
+        CpuArchitecture: 'ARM64'

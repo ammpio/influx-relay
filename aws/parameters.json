@@ -1,0 +1,18 @@
+[
+    {
+        "ParameterKey": "DeployEnvironment",
+        "UsePreviousValue": true
+    },
+    {
+        "ParameterKey": "GitHubBranch",
+        "UsePreviousValue": true
+    },
+    {
+        "ParameterKey": "DockerUser",
+        "UsePreviousValue": true
+    },
+    {
+        "ParameterKey": "DockerPass",
+        "UsePreviousValue": true
+    }
+]

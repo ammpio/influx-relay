@@ -1,0 +1,14 @@
+version: 0.2
+
+phases:
+  install:
+    runtime-versions:
+      python: 3.11
+
+  pre_build:
+    commands:
+      - echo "$DOCKER_PASS" | docker login --username $DOCKER_USER --password-stdin
+      - make docker-run
+  build:
+    commands:
+      - make test

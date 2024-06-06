@@ -1,0 +1,24 @@
+version: 0.2
+
+phases:
+  pre_build:
+    commands:
+      - TAG="$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | head -c 8)"
+      - INFLUX_RELAY_URL="${REPOSITORY_URL}:${TAG}"
+      - echo "$DOCKER_PASS" | docker login --username $DOCKER_USER --password-stdin
+      - make ecr-login
+
+  build:
+    commands:
+      - 'echo "{\"Parameters\":{" > build.hash.json'
+      - 'echo "\"CommitHash\":\"$TAG\"," >> build.hash.json'
+      - 'echo "\"DeployEnvironment\":\"$DEPLOY_ENVIRONMENT\"," >> build.hash.json'
+      - 'echo "\"Name\":\"$NAME\"," >> build.hash.json'
+      - 'echo "\"RepositoryURL\":\"$REPOSITORY_URL\"" >> build.hash.json'
+      - 'echo "}}" >> build.hash.json'
+      - docker build --tag "${INFLUX_RELAY_URL}" .
+      - docker push "$INFLUX_RELAY_URL"
+
+artifacts:
+  files:
+    - build.hash.json

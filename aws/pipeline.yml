@@ -1,0 +1,183 @@
+Description: CloudFormation template for CI/CD pipeline of Influx Relay
+
+Parameters:
+  DeployEnvironment:
+    Type: String
+  DockerRegistry:
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: docker-registry
+  DockerUser:
+    Type: String
+  DockerPass:
+    Type: String
+    NoEcho: true
+  GitHubBranch:
+    Type: String
+  Name:
+    AllowedPattern: "[a-z-].+"
+    Type: String
+    Default: influx-relay
+
+Mappings:
+  EnvMap:
+    stage:
+      SourceCodeBucket: '{{resolve:ssm:stage-source-code-storage:1}}'
+    prod:
+      SourceCodeBucket: '{{resolve:ssm:prod-source-code-storage:1}}'
+
+Resources:
+  Repository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Join [ '-', [ !Ref Name, !Ref DeployEnvironment ] ]
+      RepositoryPolicyText:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: '*'
+              Service: codebuild.amazonaws.com
+            Action:
+              - ecr:GetDownloadUrlForLayer
+              - ecr:BatchGetImage
+              - ecr:BatchCheckLayerAvailability
+
+  CodeTest:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:7.0
+        PrivilegedMode: true
+        Type: LINUX_CONTAINER
+        EnvironmentVariables:
+          - Name: DOCKER_USER
+            Value: !Ref DockerUser
+          - Name: DOCKER_PASS
+            Value: !Ref DockerPass
+      ServiceRole: !ImportValue GeneralPurposeCodeBuildRoleArn
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: aws/buildspec-test.yml
+      TimeoutInMinutes: 15
+
+  CodeBuild:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        EnvironmentVariables:
+          - Name: DOCKER_USER
+            Value: !Ref DockerUser
+          - Name: DOCKER_PASS
+            Value: !Ref DockerPass
+          - Name: DEPLOY_ENVIRONMENT
+            Value: !Ref DeployEnvironment
+          - Name: NAME
+            Value: !Ref Name
+          - Name: REPOSITORY_URL
+            Value: !Sub "${DockerRegistry}${Repository}"
+
+        Image: aws/codebuild/amazonlinux2-aarch64-standard:3.0
+        PrivilegedMode: true
+        Type: ARM_CONTAINER
+      ServiceRole: !ImportValue GeneralPurposeCodeBuildRoleArn
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: aws/buildspec.yml
+      TimeoutInMinutes: 10
+
+  CodePipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: !Join [ '-', [ !Ref Name, !Ref DeployEnvironment ] ]
+      ArtifactStore:
+        Location: !FindInMap [ EnvMap, !Ref DeployEnvironment, SourceCodeBucket ]
+        Type: S3
+      RestartExecutionOnUpdate: false
+      RoleArn: !ImportValue GeneralPurposeCodePipelineRoleArn
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: Source
+              ActionTypeId:
+                Category: Source
+                Owner: ThirdParty
+                Provider: GitHub
+                Version: "1"
+              Configuration:
+                Owner: ammpio
+                Repo: !Ref Name
+                Branch: !Ref GitHubBranch
+                OAuthToken: !ImportValue GitHubOAuth2Token
+                PollForSourceChanges: false
+              OutputArtifacts:
+                - Name: source
+
+        - Name: Test
+          Actions:
+            - Name: Test
+              ActionTypeId:
+                Category: Test
+                Owner: AWS
+                Provider: CodeBuild
+                Version: "1"
+              Configuration:
+                ProjectName: !Ref CodeTest
+                PrimarySource: source
+              InputArtifacts:
+                - Name: source
+
+        - Name: Build
+          Actions:
+            - Name: CodeBuild
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: "1"
+              Configuration:
+                ProjectName: !Ref CodeBuild
+                PrimarySource: source
+              InputArtifacts:
+                - Name: source
+              OutputArtifacts:
+                - Name: build_hash
+
+        - Name: Deploy
+          Actions:
+            - Name: Deploy
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: "1"
+              Configuration:
+                ActionMode: CREATE_UPDATE
+                Capabilities: CAPABILITY_IAM
+                RoleArn: !ImportValue GeneralPurposeCloudFormationRoleArn
+                StackName: !Join ['-', [!Ref Name, !Ref DeployEnvironment, 'service']]
+                TemplateConfiguration: build_hash::build.hash.json
+                TemplatePath: source::aws/deploy.yml
+              InputArtifacts:
+                - Name: build_hash
+                - Name: source
+              RunOrder: 1
+
+  GithubWebhook:
+    Type: AWS::CodePipeline::Webhook
+    Properties:
+      Authentication: GITHUB_HMAC
+      AuthenticationConfiguration:
+        SecretToken: !ImportValue GitHubOAuth2Token
+      RegisterWithThirdParty: true
+      Filters:
+        - JsonPath: "$.ref"
+          MatchEquals: refs/heads/{Branch}
+      TargetPipeline: !Ref CodePipeline
+      TargetAction: Source
+      TargetPipelineVersion: !GetAtt CodePipeline.Version
