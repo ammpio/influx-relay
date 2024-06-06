@@ -1,2 +1,0 @@
-m,host=host1 field1=1.2,field2=5i 1640995200000000000
-m,host=host2 field1=2.4,field2=3i 1640995200000000000
